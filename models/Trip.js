@@ -30,40 +30,54 @@ const tripSchema = new mongoose.Schema(
     daysCount: {
       type: Number,
     },
+    issueDate: {
+      type: Date,
+      default: null,
+    },
+    airline: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    // ⚠️  NO enum here — enum with runValidators rejects '' on update
+    travelClass: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    sector: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    fare: {
+      type: Number,
+      default: null,
+    },
+    fareCurrency: {
+      type: String,
+      trim: true,
+      default: 'AED',
+    },
     notes: {
       type: String,
       trim: true,
       default: '',
     },
   },
-  {
-    timestamps: true,
-  }
+  { timestamps: true }
 );
 
-// Auto-calculate days (inclusive: both departure and return counted)
+// Auto-calculate daysCount on every save
 tripSchema.pre('save', function (next) {
   if (this.departureDate && this.returnDate) {
     const msPerDay = 1000 * 60 * 60 * 24;
-    const diff = Math.round(
-      (this.returnDate - this.departureDate) / msPerDay
-    );
-    this.daysCount = diff + 1; // inclusive
+    this.daysCount = Math.round((this.returnDate - this.departureDate) / msPerDay) + 1;
   }
   next();
 });
 
-// Also handle findOneAndUpdate
-tripSchema.pre('findOneAndUpdate', function (next) {
-  const update = this.getUpdate();
-  if (update.departureDate && update.returnDate) {
-    const msPerDay = 1000 * 60 * 60 * 24;
-    const dep = new Date(update.departureDate);
-    const ret = new Date(update.returnDate);
-    const diff = Math.round((ret - dep) / msPerDay);
-    update.daysCount = diff + 1;
-  }
-  next();
-});
+// ⚠️  Do NOT use pre('findOneAndUpdate') for daysCount — the PUT route
+//     now does a find → mutate → save() cycle so the pre('save') hook fires.
 
 module.exports = mongoose.model('Trip', tripSchema);
