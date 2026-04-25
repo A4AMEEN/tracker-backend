@@ -11,28 +11,44 @@ function getFinancialYearRange(financialYear) {
 }
 
 function computeStats(allTrips, filterFn) {
-  const MS = 1000 * 60 * 60 * 24;
+  const MS = 86_400_000;
   const sorted = [...allTrips].sort((a, b) => new Date(a.departureDate) - new Date(b.departureDate));
   const segments = [];
 
   for (let i = 0; i < sorted.length; i++) {
-    const trip = sorted[i];
-    const dep  = new Date(trip.departureDate);
-    const ret  = new Date(trip.returnDate);
-    const dest = trip.direction === 'UAE_TO_INDIA' ? 'india' : 'uae';
-    segments.push({ start: dep, end: ret, country: dest, type: 'trip' });
+    const trip    = sorted[i];
+    const dep     = new Date(trip.departureDate);
+    const ret     = new Date(trip.returnDate);
+    const dest    = trip.direction === 'UAE_TO_INDIA' ? 'india' : 'uae';
 
+    // For UAE→India: arrival day (dep) counts, departure day (ret) does NOT
+    // so the India segment is [dep, ret-1]
+    // For India→UAE: departure day does NOT count as India, so UAE segment is [dep, ret]
+    const segEnd = trip.direction === 'UAE_TO_INDIA'
+      ? new Date(ret.getTime() - MS)   // exclude departure day from India
+      : ret;
+
+    segments.push({ start: dep, end: segEnd, country: dest, type: 'trip' });
+
+    // Gap between this return and next departure
     if (i < sorted.length - 1) {
-      const nextDep  = new Date(sorted[i + 1].departureDate);
-      const gapStart = new Date(ret.getTime() + MS);
+      const nextTrip = sorted[i + 1];
+      const nextDep  = new Date(nextTrip.departureDate);
+
+      // Gap starts the day after segEnd (they're now "home" in the return country)
+      const gapStart = new Date(segEnd.getTime() + MS);
+      // Gap ends the day before the next departure (next departure day excluded from current country)
       const gapEnd   = new Date(nextDep.getTime() - MS);
+
       if (gapEnd >= gapStart) {
+        // After a UAE→India trip they return to UAE; after India→UAE they return to India
         const gapCountry = trip.direction === 'UAE_TO_INDIA' ? 'uae' : 'india';
         segments.push({ start: gapStart, end: gapEnd, country: gapCountry, type: 'gap' });
       }
     }
   }
 
+  // Rest of computeStats is unchanged — accumulate days from segments
   const monthlyMap = {}, yearlyMap = {};
   let daysInIndia = 0, daysInUAE = 0;
 
@@ -49,8 +65,8 @@ function computeStats(allTrips, filterFn) {
 
     let cursor = new Date(segStart.getFullYear(), segStart.getMonth(), segStart.getDate());
     while (cursor <= segEnd) {
-      const yearKey  = cursor.getFullYear().toString();
-      const monthKey = `${yearKey}-${String(cursor.getMonth() + 1).padStart(2, '0')}`;
+      const yearKey   = cursor.getFullYear().toString();
+      const monthKey  = `${yearKey}-${String(cursor.getMonth() + 1).padStart(2, '0')}`;
       const endOfMonth = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0);
       const sliceEnd   = endOfMonth < segEnd ? endOfMonth : new Date(segEnd);
       const sliceDays  = Math.round((sliceEnd - cursor) / MS) + 1;
@@ -58,13 +74,18 @@ function computeStats(allTrips, filterFn) {
       if (!monthlyMap[monthKey]) monthlyMap[monthKey] = { india: 0, uae: 0, tripsToIndia: 0, tripsToUAE: 0 };
       if (!yearlyMap[yearKey])   yearlyMap[yearKey]   = { india: 0, uae: 0, tripsToIndia: 0, tripsToUAE: 0 };
 
-      if (seg.country === 'india') { monthlyMap[monthKey].india += sliceDays; yearlyMap[yearKey].india += sliceDays; }
-      else                         { monthlyMap[monthKey].uae   += sliceDays; yearlyMap[yearKey].uae   += sliceDays; }
-
+      if (seg.country === 'india') {
+        monthlyMap[monthKey].india += sliceDays;
+        yearlyMap[yearKey].india   += sliceDays;
+      } else {
+        monthlyMap[monthKey].uae   += sliceDays;
+        yearlyMap[yearKey].uae     += sliceDays;
+      }
       cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
     }
   }
 
+  // Trip counts (unchanged)
   let tripsToIndia = 0, tripsToUAE = 0;
   for (const trip of allTrips) {
     const dep = new Date(trip.departureDate);
@@ -85,8 +106,8 @@ function computeStats(allTrips, filterFn) {
 
   return {
     daysInIndia, daysInUAE, tripsToIndia, tripsToUAE,
-    monthly: Object.entries(monthlyMap).map(([month, d]) => ({ month, ...d })).sort((a,b) => a.month.localeCompare(b.month)),
-    yearly:  Object.entries(yearlyMap) .map(([year,  d]) => ({ year,  ...d })).sort((a,b) => a.year.localeCompare(b.year)),
+    monthly: Object.entries(monthlyMap).map(([month, d]) => ({ month, ...d })).sort((a, b) => a.month.localeCompare(b.month)),
+    yearly:  Object.entries(yearlyMap) .map(([year,  d]) => ({ year,  ...d })).sort((a, b) => a.year.localeCompare(b.year)),
   };
 }
 
