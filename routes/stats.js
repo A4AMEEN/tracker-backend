@@ -1,163 +1,106 @@
+// routes/stats.js
 const express = require('express');
 const router  = express.Router();
 const Trip    = require('../models/Trip');
 
-function getFinancialYearRange(financialYear) {
-  const startYear = parseInt(String(financialYear).split('-')[0], 10);
-  return {
-    from: new Date(Date.UTC(startYear,     3,  1,  0,  0,  0,   0)),
-    to:   new Date(Date.UTC(startYear + 1, 2, 31, 23, 59, 59, 999)),
-  };
-}
-
-function computeStats(allTrips, filterFn) {
-  const MS = 86_400_000;
-  const sorted = [...allTrips].sort((a, b) => new Date(a.departureDate) - new Date(b.departureDate));
-  const segments = [];
-
-  for (let i = 0; i < sorted.length; i++) {
-    const trip    = sorted[i];
-    const dep     = new Date(trip.departureDate);
-    const ret     = new Date(trip.returnDate);
-    const dest    = trip.direction === 'UAE_TO_INDIA' ? 'india' : 'uae';
-
-    // For UAE→India: arrival day (dep) counts, departure day (ret) does NOT
-    // so the India segment is [dep, ret-1]
-    // For India→UAE: departure day does NOT count as India, so UAE segment is [dep, ret]
-    const segEnd = trip.direction === 'UAE_TO_INDIA'
-      ? new Date(ret.getTime() - MS)   // exclude departure day from India
-      : ret;
-
-    segments.push({ start: dep, end: segEnd, country: dest, type: 'trip' });
-
-    // Gap between this return and next departure
-    if (i < sorted.length - 1) {
-      const nextTrip = sorted[i + 1];
-      const nextDep  = new Date(nextTrip.departureDate);
-
-      // Gap starts the day after segEnd (they're now "home" in the return country)
-      const gapStart = new Date(segEnd.getTime() + MS);
-      // Gap ends the day before the next departure (next departure day excluded from current country)
-      const gapEnd   = new Date(nextDep.getTime() - MS);
-
-      if (gapEnd >= gapStart) {
-        // After a UAE→India trip they return to UAE; after India→UAE they return to India
-        const gapCountry = trip.direction === 'UAE_TO_INDIA' ? 'uae' : 'india';
-        segments.push({ start: gapStart, end: gapEnd, country: gapCountry, type: 'gap' });
-      }
-    }
-  }
-
-  // Rest of computeStats is unchanged — accumulate days from segments
-  const monthlyMap = {}, yearlyMap = {};
-  let daysInIndia = 0, daysInUAE = 0;
-
-  for (const seg of segments) {
-    let segStart = new Date(seg.start), segEnd = new Date(seg.end);
-    if (filterFn) {
-      if (filterFn.from && segStart < filterFn.from) segStart = new Date(filterFn.from);
-      if (filterFn.to   && segEnd   > filterFn.to  ) segEnd   = new Date(filterFn.to);
-      if (segEnd < segStart) continue;
-    }
-    const days = Math.round((segEnd - segStart) / MS) + 1;
-    if (days <= 0) continue;
-    if (seg.country === 'india') daysInIndia += days; else daysInUAE += days;
-
-    let cursor = new Date(segStart.getFullYear(), segStart.getMonth(), segStart.getDate());
-    while (cursor <= segEnd) {
-      const yearKey   = cursor.getFullYear().toString();
-      const monthKey  = `${yearKey}-${String(cursor.getMonth() + 1).padStart(2, '0')}`;
-      const endOfMonth = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0);
-      const sliceEnd   = endOfMonth < segEnd ? endOfMonth : new Date(segEnd);
-      const sliceDays  = Math.round((sliceEnd - cursor) / MS) + 1;
-
-      if (!monthlyMap[monthKey]) monthlyMap[monthKey] = { india: 0, uae: 0, tripsToIndia: 0, tripsToUAE: 0 };
-      if (!yearlyMap[yearKey])   yearlyMap[yearKey]   = { india: 0, uae: 0, tripsToIndia: 0, tripsToUAE: 0 };
-
-      if (seg.country === 'india') {
-        monthlyMap[monthKey].india += sliceDays;
-        yearlyMap[yearKey].india   += sliceDays;
-      } else {
-        monthlyMap[monthKey].uae   += sliceDays;
-        yearlyMap[yearKey].uae     += sliceDays;
-      }
-      cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
-    }
-  }
-
-  // Trip counts (unchanged)
-  let tripsToIndia = 0, tripsToUAE = 0;
-  for (const trip of allTrips) {
-    const dep = new Date(trip.departureDate);
-    if (filterFn?.from && dep < filterFn.from) continue;
-    if (filterFn?.to   && dep > filterFn.to  ) continue;
-    const yearKey  = dep.getFullYear().toString();
-    const monthKey = `${yearKey}-${String(dep.getMonth() + 1).padStart(2, '0')}`;
-    if (trip.direction === 'UAE_TO_INDIA') {
-      tripsToIndia++;
-      if (yearlyMap[yearKey])   yearlyMap[yearKey].tripsToIndia++;
-      if (monthlyMap[monthKey]) monthlyMap[monthKey].tripsToIndia++;
-    } else {
-      tripsToUAE++;
-      if (yearlyMap[yearKey])   yearlyMap[yearKey].tripsToUAE++;
-      if (monthlyMap[monthKey]) monthlyMap[monthKey].tripsToUAE++;
-    }
-  }
-
-  return {
-    daysInIndia, daysInUAE, tripsToIndia, tripsToUAE,
-    monthly: Object.entries(monthlyMap).map(([month, d]) => ({ month, ...d })).sort((a, b) => a.month.localeCompare(b.month)),
-    yearly:  Object.entries(yearlyMap) .map(([year,  d]) => ({ year,  ...d })).sort((a, b) => a.year.localeCompare(b.year)),
-  };
-}
-
-// GET /api/stats/summary
+// ── GET /api/stats/summary ────────────────────────────────────────────────────
 router.get('/summary', async (req, res) => {
   try {
-    const { year, financialYear, username } = req.query;
+    const { year, username } = req.query;
 
-    // Apply username filter at DB level so gap-calc only uses that person's trips
+    // ── Build mongo filter ──────────────────────────────────────────────────
     const mongoFilter = {};
+
     if (username && username !== 'ALL') {
       mongoFilter.username = { $regex: `^${username}$`, $options: 'i' };
     }
-    const allTrips = await Trip.find(mongoFilter).sort({ departureDate: 1 });
-
-    let filterFn = null;
-    if (financialYear && financialYear !== 'ALL') {
-      filterFn = getFinancialYearRange(financialYear);
-    } else if (year && year !== 'ALL') {
+    if (year && year !== 'ALL') {
       const y = parseInt(year, 10);
-      filterFn = {
-        from: new Date(Date.UTC(y,  0,  1,  0,  0,  0,   0)),
-        to:   new Date(Date.UTC(y, 11, 31, 23, 59, 59, 999)),
+      // Filter by financial year: Apr 1 of y → Mar 31 of y+1
+      // We use returnDate as the anchor field
+      mongoFilter.returnDate = {
+        $gte: new Date(Date.UTC(y,     3,  1)),   // Apr 1
+        $lte: new Date(Date.UTC(y + 1, 2, 31, 23, 59, 59, 999)), // Mar 31
       };
     }
 
-    const stats = computeStats(allTrips, filterFn);
+    const trips = await Trip.find(mongoFilter).sort({ returnDate: 1, travelDate: 1 }).lean();
 
-    // Year/FY lists from ALL trips (not filtered by username)
-    const allForYears = await Trip.find({}, { departureDate: 1 });
-    const availableYears = [...new Set(allForYears.map(t => new Date(t.departureDate).getUTCFullYear()))].sort((a,b) => b-a);
-    const availableFinancialYears = [...new Set(allForYears.map(t => {
-      const d = new Date(t.departureDate);
-      const y = d.getUTCMonth() >= 3 ? d.getUTCFullYear() : d.getUTCFullYear() - 1;
-      return `${y}-${String((y+1)%100).padStart(2,'0')}`;
-    }))].sort((a,b) => b.localeCompare(a));
+    // ── Aggregate ───────────────────────────────────────────────────────────
+    let daysInIndia = 0;
+    let daysInUAE   = 0;
+    let totalTrips  = trips.length;
 
-    // All distinct usernames for the filter dropdown
+    const monthlyMap = {};
+    const yearlyMap  = {};
+
+    for (const trip of trips) {
+      const india = trip.inIndiaDays || 0;
+      const uae   = trip.inUAEDays   || 0;
+
+      daysInIndia += india;
+      daysInUAE   += uae;
+
+      // Use returnDate for bucketing (most records have it; fallback to travelDate)
+      const anchor = trip.returnDate || trip.travelDate;
+      if (!anchor) continue;
+
+      const d        = new Date(anchor);
+      const yearKey  = d.getUTCFullYear().toString();
+      const monthKey = `${yearKey}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+
+      if (!yearlyMap[yearKey])   yearlyMap[yearKey]   = { india: 0, uae: 0, trips: 0 };
+      if (!monthlyMap[monthKey]) monthlyMap[monthKey] = { india: 0, uae: 0, trips: 0 };
+
+      yearlyMap[yearKey].india   += india;
+      yearlyMap[yearKey].uae     += uae;
+      yearlyMap[yearKey].trips   += 1;
+
+      monthlyMap[monthKey].india += india;
+      monthlyMap[monthKey].uae   += uae;
+      monthlyMap[monthKey].trips += 1;
+    }
+
+    // ── Available years / usernames (from ALL trips, not filtered) ──────────
+    const allTrips = await Trip.find({}, { returnDate: 1, travelDate: 1, username: 1 }).lean();
+
+    const availableYears = [...new Set(
+      allTrips
+        .map(t => t.returnDate || t.travelDate)
+        .filter(Boolean)
+        .map(d => new Date(d).getUTCFullYear())
+    )].sort((a, b) => b - a);
+
+    // Financial years: April of year N → March of year N+1
+    const availableFinancialYears = [...new Set(
+      allTrips
+        .map(t => t.returnDate || t.travelDate)
+        .filter(Boolean)
+        .map(d => {
+          const dt = new Date(d);
+          const y  = dt.getUTCMonth() >= 3 ? dt.getUTCFullYear() : dt.getUTCFullYear() - 1;
+          return `${y}-${String((y + 1) % 100).padStart(2, '0')}`;
+        })
+    )].sort((a, b) => b.localeCompare(a));
+
     const availableUsernames = (await Trip.distinct('username')).sort();
 
     res.json({
       success: true,
       data: {
-        ...stats,
-        totalTrips: allTrips.length,
-        totalDays: stats.daysInIndia + stats.daysInUAE,
+        daysInIndia,
+        daysInUAE,
+        totalDays:   daysInIndia + daysInUAE,
+        totalTrips,
+        monthly: Object.entries(monthlyMap)
+          .map(([month, d]) => ({ month, india: d.india, uae: d.uae, trips: d.trips }))
+          .sort((a, b) => a.month.localeCompare(b.month)),
+        yearly: Object.entries(yearlyMap)
+          .map(([year, d]) => ({ year, india: d.india, uae: d.uae, trips: d.trips }))
+          .sort((a, b) => a.year.localeCompare(b.year)),
         availableYears,
         availableFinancialYears,
         availableUsernames,
-        note: 'Gap days between trips are attributed to the country you returned to.',
       },
     });
   } catch (err) {
@@ -165,17 +108,31 @@ router.get('/summary', async (req, res) => {
   }
 });
 
-// GET /api/stats/years
+// ── GET /api/stats/years ──────────────────────────────────────────────────────
 router.get('/years', async (req, res) => {
   try {
-    const trips = await Trip.find({}, { departureDate: 1 });
-    const years = [...new Set(trips.map(t => new Date(t.departureDate).getUTCFullYear()))].sort((a,b) => b-a);
-    const financialYears = [...new Set(trips.map(t => {
-      const d = new Date(t.departureDate);
-      const y = d.getUTCMonth() >= 3 ? d.getUTCFullYear() : d.getUTCFullYear() - 1;
-      return `${y}-${String((y+1)%100).padStart(2,'0')}`;
-    }))].sort((a,b) => b.localeCompare(a));
+    const trips = await Trip.find({}, { returnDate: 1, travelDate: 1, username: 1 }).lean();
+
+    const years = [...new Set(
+      trips
+        .map(t => t.returnDate || t.travelDate)
+        .filter(Boolean)
+        .map(d => new Date(d).getUTCFullYear())
+    )].sort((a, b) => b - a);
+
+    const financialYears = [...new Set(
+      trips
+        .map(t => t.returnDate || t.travelDate)
+        .filter(Boolean)
+        .map(d => {
+          const dt = new Date(d);
+          const y  = dt.getUTCMonth() >= 3 ? dt.getUTCFullYear() : dt.getUTCFullYear() - 1;
+          return `${y}-${String((y + 1) % 100).padStart(2, '0')}`;
+        })
+    )].sort((a, b) => b.localeCompare(a));
+
     const usernames = (await Trip.distinct('username')).sort();
+
     res.json({ success: true, data: { years, financialYears, usernames } });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

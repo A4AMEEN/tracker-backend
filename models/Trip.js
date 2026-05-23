@@ -1,86 +1,45 @@
-const mongoose = require("mongoose");
+// models/Trip.js
+const mongoose = require('mongoose');
 
-const tripSchema = new mongoose.Schema(
-  {
-    username: {
-      type: String,
-      required: true,
-      default: "Sajeev PK",
-      trim: true,
-    },
-    designation: {
-      type: String,
-      required: true,
-      default: "Managing Director",
-      trim: true,
-    },
-    direction: {
-      type: String,
-      required: true,
-      enum: ["UAE_TO_INDIA", "INDIA_TO_UAE"],
-    },
-    departureDate: {
-      type: Date,
-      required: true,
-    },
-    returnDate: {
-      type: Date,
-      required: true,
-    },
-    daysCount: {
-      type: Number,
-    },
-    issueDate: {
-      type: Date,
-      default: null,
-    },
-    airline: {
-      type: String,
-      trim: true,
-      default: "",
-    },
-    // ⚠️  NO enum here — enum with runValidators rejects '' on update
-    travelClass: {
-      type: String,
-      trim: true,
-      default: "",
-    },
-    sector: {
-      type: String,
-      trim: true,
-      default: "",
-    },
-    fare: {
-      type: Number,
-      default: null,
-    },
-    fareCurrency: {
-      type: String,
-      trim: true,
-      default: "AED",
-    },
-    notes: {
-      type: String,
-      trim: true,
-      default: "",
-    },
-    arrivalTime: { type: String, default: null }, // "HH:MM" IST — UAE→India only
-    departureTime: { type: String, default: null }, // "HH:MM" IST — India→UAE only
-  },
-  { timestamps: true },
-);
+const TripSchema = new mongoose.Schema({
+  // ── Who ───────────────────────────────────────────────────
+  username:     { type: String, required: true, trim: true },
+  designation:  { type: String, default: '',   trim: true },
 
-// Auto-calculate daysCount on every save
-tripSchema.pre("save", function (next) {
-  if (this.departureDate && this.returnDate) {
-    const msPerDay = 1000 * 60 * 60 * 24;
-    this.daysCount =
-      Math.round((this.returnDate - this.departureDate) / msPerDay) + 1;
-  }
-  next();
+  // ── Ticket info ───────────────────────────────────────────
+  issueDate:    { type: Date,   default: null },
+  airline:      { type: String, default: '',   trim: true },
+  sector:       { type: String, default: '',   trim: true },   // e.g. "COK/DXB/TRV"
+  travelClass:  { type: String, default: '',   trim: true },
+
+  // ── Travel dates ──────────────────────────────────────────
+  // travelDateText: stores "In UAE" / "In India" for opening-balance rows,
+  //                 or left null when travelDate (Date) is set
+  travelDateText: { type: String, default: null },             // "In UAE" | "In India" | null
+  travelDate:     { type: Date,   default: null },             // null when travelDateText is set
+  returnDate:     { type: Date,   default: null },
+
+  // ── Times ─────────────────────────────────────────────────
+  exitTime:     { type: String, default: '' },                 // "4:30 AM"
+  entryTime:    { type: String, default: '' },                 // "3:10 AM"
+
+  // ── Days (manually entered) ───────────────────────────────
+  inIndiaDays:  { type: Number, default: 0 },
+  inUAEDays:    { type: Number, default: 0 },
+
+  // ── Notes ─────────────────────────────────────────────────
+  notes:        { type: String, default: '' },
+
+}, { timestamps: true });
+
+// Virtual: total days this record
+TripSchema.virtual('totalDays').get(function () {
+  return (this.inIndiaDays || 0) + (this.inUAEDays || 0);
 });
 
-// ⚠️  Do NOT use pre('findOneAndUpdate') for daysCount — the PUT route
-//     now does a find → mutate → save() cycle so the pre('save') hook fires.
+// Sort helper: effective date for ordering
+TripSchema.virtual('effectiveDate').get(function () {
+  return this.travelDate || this.returnDate;
+});
 
-module.exports = mongoose.model("Trip", tripSchema);
+module.exports = mongoose.model('Trip', TripSchema);
