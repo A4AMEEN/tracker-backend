@@ -1,257 +1,169 @@
 // routes/trips.js
-const express = require('express');
-const router  = express.Router();
-const Trip    = require('../models/Trip');
-const nodemailer = require('nodemailer');
+const express  = require('express');
+const router   = express.Router();
+const Trip     = require('../models/Trip');
+const { sendTravelLogBackup } = require('../services/emailService');
 
-// ── Email config ─────────────────────────────────────────────────────────────
-const BACKUP_EMAIL = 'ameenomen15@gmail.com';
-
-function createTransporter() {
-  return nodemailer.createTransport({
-    host:   process.env.EMAIL_HOST   || 'smtp.gmail.com',
-    port:   parseInt(process.env.EMAIL_PORT || '587', 10),
-    secure: process.env.EMAIL_SECURE === 'true',
-    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-  });
-}
-
-async function getAllTripsByUser() {
-  const allTrips = await Trip.find({}).sort({ username: 1, travelDate: 1, returnDate: 1 }).lean();
-  const grouped  = {};
-  for (const trip of allTrips) {
-    const key = trip.username.trim();
-    if (!grouped[key]) grouped[key] = [];
-    grouped[key].push(trip);
-  }
-  const sortedKeys = Object.keys(grouped).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
-  return { grouped, sortedKeys };
-}
-
-function fmtDate(d) {
-  if (!d) return '—';
-  const dt = new Date(d);
-  return isNaN(dt) ? '—' : dt.toLocaleDateString('en-GB');
-}
-
-function buildEmailBody({ grouped, sortedKeys, action, changedTrip, username }) {
-  const now = new Date().toLocaleString('en-AE', { timeZone: 'Asia/Dubai' });
-  let totalTrips = 0;
-  for (const k of sortedKeys) totalTrips += grouped[k].length;
-
-  let html = `
-  <div style="font-family:Arial,sans-serif;max-width:960px;margin:0 auto;color:#333">
-    <h2 style="background:#1a365d;color:#fff;padding:16px 20px;border-radius:6px 6px 0 0;margin:0">✈️ Travel Log Backup</h2>
-    <div style="background:#eaf0fb;padding:12px 20px;border-left:4px solid #2b6cb0;margin-bottom:20px">
-      <strong>Action:</strong> ${action}<br>
-      <strong>Triggered by:</strong> ${username || 'Unknown'}<br>
-      <strong>Generated at:</strong> ${now} (Dubai time)<br>
-      <strong>Total records:</strong> ${totalTrips} trips across ${sortedKeys.length} users
-    </div>`;
-
-  for (const name of sortedKeys) {
-    const trips     = grouped[name];
-    const inIndia   = trips.reduce((s, t) => s + (t.inIndiaDays || 0), 0);
-    const inUAE     = trips.reduce((s, t) => s + (t.inUAEDays   || 0), 0);
-
-    html += `
-    <div style="margin-bottom:28px">
-      <h3 style="background:#2d3748;color:#fff;padding:8px 16px;border-radius:4px;margin:0 0 4px 0">
-        👤 ${name}
-        <span style="font-size:13px;font-weight:normal;margin-left:12px;opacity:.8">
-          ${trips.length} record${trips.length !== 1 ? 's' : ''} &nbsp;|&nbsp;
-          🇮🇳 ${inIndia}d in India &nbsp;|&nbsp; 🇦🇪 ${inUAE}d in UAE
-        </span>
-      </h3>
-      <table style="width:100%;border-collapse:collapse;font-size:13px">
-        <thead>
-          <tr style="background:#f7fafc">
-            <th style="padding:7px 10px;border:1px solid #e2e8f0">#</th>
-            <th style="padding:7px 10px;border:1px solid #e2e8f0">Issue Date</th>
-            <th style="padding:7px 10px;border:1px solid #e2e8f0">Sector</th>
-            <th style="padding:7px 10px;border:1px solid #e2e8f0">Class</th>
-            <th style="padding:7px 10px;border:1px solid #e2e8f0">Travel Date</th>
-            <th style="padding:7px 10px;border:1px solid #e2e8f0">Return Date</th>
-            <th style="padding:7px 10px;border:1px solid #e2e8f0">In India</th>
-            <th style="padding:7px 10px;border:1px solid #e2e8f0">In UAE</th>
-            <th style="padding:7px 10px;border:1px solid #e2e8f0">Exit Time</th>
-            <th style="padding:7px 10px;border:1px solid #e2e8f0">Entry Time</th>
-            <th style="padding:7px 10px;border:1px solid #e2e8f0">Notes</th>
-          </tr>
-        </thead>
-        <tbody>`;
-
-    trips.forEach((t, i) => {
-      const isChanged = changedTrip && String(t._id) === String(changedTrip._id);
-      const rowBg = isChanged ? '#fffbeb' : i % 2 === 0 ? '#fff' : '#f7fafc';
-      const travelDisplay = t.travelDateText || fmtDate(t.travelDate);
-
-      html += `
-          <tr style="background:${rowBg}${isChanged ? ';font-weight:600' : ''}">
-            <td style="padding:6px 10px;border:1px solid #e2e8f0">${i + 1}${isChanged ? ' ★' : ''}</td>
-            <td style="padding:6px 10px;border:1px solid #e2e8f0">${fmtDate(t.issueDate)}</td>
-            <td style="padding:6px 10px;border:1px solid #e2e8f0">${t.sector || '—'}</td>
-            <td style="padding:6px 10px;border:1px solid #e2e8f0">${t.travelClass || '—'}</td>
-            <td style="padding:6px 10px;border:1px solid #e2e8f0">${travelDisplay}</td>
-            <td style="padding:6px 10px;border:1px solid #e2e8f0">${fmtDate(t.returnDate)}</td>
-            <td style="padding:6px 10px;border:1px solid #e2e8f0">${t.inIndiaDays ?? 0}</td>
-            <td style="padding:6px 10px;border:1px solid #e2e8f0">${t.inUAEDays ?? 0}</td>
-            <td style="padding:6px 10px;border:1px solid #e2e8f0">${t.exitTime || '—'}</td>
-            <td style="padding:6px 10px;border:1px solid #e2e8f0">${t.entryTime || '—'}</td>
-            <td style="padding:6px 10px;border:1px solid #e2e8f0">${t.notes || ''}</td>
-          </tr>`;
-    });
-
-    html += `</tbody></table></div>`;
-  }
-
-  html += `<p style="font-size:12px;color:#718096;margin-top:20px">
-    Automated backup from Travel Tracker. ★ = record that triggered this email.
-  </p></div>`;
-
-  let text = `Travel Log Backup\nAction: ${action}\nGenerated: ${now}\n\n`;
-  for (const name of sortedKeys) {
-    text += `\n=== ${name} ===\n`;
-    grouped[name].forEach((t, i) => {
-      const td = t.travelDateText || fmtDate(t.travelDate);
-      text += `  ${i+1}. ${t.sector||'—'}  Travel:${td}  Return:${fmtDate(t.returnDate)}  India:${t.inIndiaDays||0}  UAE:${t.inUAEDays||0}\n`;
-    });
-  }
-  return { html, text };
-}
-
-async function sendBackupEmail({ action, changedTrip, username }) {
+async function triggerBackup(action, username) {
   try {
-    const { grouped, sortedKeys } = await getAllTripsByUser();
-    const { html, text } = buildEmailBody({ grouped, sortedKeys, action, changedTrip, username });
-    const transporter = createTransporter();
-    await transporter.verify();
-    const now     = new Date().toLocaleString('en-AE', { timeZone: 'Asia/Dubai' });
-    const subject = `[Travel Log Backup] ${action} — ${now}`;
-    const info    = await transporter.sendMail({
-      from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
-      to: BACKUP_EMAIL, subject, text, html,
-    });
-    console.log(`[EMAIL] ✅ Sent — ${info.messageId}`);
-  } catch (err) {
-    console.error(`[EMAIL] ❌ ${err.message}`);
-  }
+    const all = await Trip.find({}).sort({ username: 1, travelDate: 1 });
+    sendTravelLogBackup(all, action, username).catch(() => {});
+  } catch (e) { console.error('[Backup]', e.message); }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function buildSortKey(trip) {
-  // For ordering: use travelDate, fall back to returnDate
-  if (trip.travelDate) return new Date(trip.travelDate).getTime();
-  if (trip.returnDate) return new Date(trip.returnDate).getTime();
-  return 0;
-}
-
-// ── GET /api/trips ────────────────────────────────────────────────────────────
+// ── GET /api/trips ───────────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
-    const { username, year, month, startDate, endDate } = req.query;
+    const { username, year, startDate, endDate } = req.query;
     const filter = {};
-
-    if (username) filter.username = { $regex: `^${username}$`, $options: 'i' };
-
-    // Date filter applies to returnDate (most reliable field)
-    if (year && month) {
-      filter.returnDate = {
-        $gte: new Date(year, month - 1, 1),
-        $lte: new Date(year, month, 0),
-      };
-    } else if (year) {
-      filter.returnDate = {
-        $gte: new Date(`${year}-01-01`),
-        $lte: new Date(`${year}-12-31`),
+    if (username) filter.username = { $regex: `^${username.trim()}$`, $options: 'i' };
+    if (year) {
+      const y = parseInt(year, 10);
+      filter.travelDate = {
+        $gte: new Date(Date.UTC(y, 0, 1)),
+        $lte: new Date(Date.UTC(y, 11, 31, 23, 59, 59, 999)),
       };
     }
     if (startDate && endDate) {
-      filter.returnDate = { $gte: new Date(startDate), $lte: new Date(endDate) };
+      filter.travelDate = {
+        $gte: new Date(startDate + 'T00:00:00.000Z'),
+        $lte: new Date(endDate   + 'T23:59:59.999Z'),
+      };
+    }
+    const trips = await Trip.find(filter).sort({ username: 1, travelDate: 1 });
+    res.json({ success: true, data: trips, count: trips.length });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// ── GET /api/trips/calculate-days ────────────────────────────────────────────
+// Auto-calculates inUAEDays and suggests inIndiaDays for a trip being added/edited
+// Query: username, travelDate, returnDate, tripId (optional, for edit mode)
+router.get('/calculate-days', async (req, res) => {
+  try {
+    const { username, travelDate, returnDate, tripId } = req.query;
+    const MS = 86400000;
+
+    let inUAEDays = 0;
+    let inIndiaDays = 0;
+
+    // ── UAE days: returnDate - travelDate - 1 (confirmed formula) ────────────
+    if (travelDate && returnDate) {
+      const dep = new Date(travelDate);
+      const ret = new Date(returnDate);
+      inUAEDays = Math.max(0, Math.round((ret - dep) / MS) - 1);
     }
 
-    const trips = await Trip.find(filter).sort({ returnDate: 1, travelDate: 1 });
-    res.json({ success: true, data: trips, count: trips.length });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+    // ── India days: find surrounding trips for this user to compute gap ───────
+    // India days = gap between previous trip's returnDate and this travelDate
+    // = nextTravelDate - prevReturnDate - 1 (exclude both endpoints)
+    // This is a SUGGESTION — user can override.
+    if (username && travelDate) {
+      const filter = { username: { $regex: `^${username.trim()}$`, $options: 'i' } };
+      if (tripId) filter._id = { $ne: tripId }; // exclude self in edit mode
+      const allUserTrips = await Trip.find(filter).sort({ travelDate: 1 });
+      
+      const thisDate = new Date(travelDate);
+      
+      // Find the most recent trip that returned before this one's travelDate
+      let prevTrip = null;
+      for (const t of allUserTrips) {
+        if (t.returnDate && new Date(t.returnDate) < thisDate) {
+          prevTrip = t;
+        }
+      }
+
+      if (prevTrip?.returnDate) {
+        const prevReturn = new Date(prevTrip.returnDate);
+        inIndiaDays = Math.max(0, Math.round((thisDate - prevReturn) / MS) - 1);
+      }
+    }
+
+    // Row 1 special case: "IN UAE" (no travelDate) — inIndiaDays = 0, inUAEDays calculated from period start
+    if (!travelDate && returnDate) {
+      inUAEDays = 0;    // Will be manually entered for "In UAE" starting rows
+      inIndiaDays = 0;
+    }
+
+    res.json({ success: true, data: { inUAEDays, inIndiaDays } });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
-// ── POST /api/trips ───────────────────────────────────────────────────────────
+// ── GET /api/trips/:id ───────────────────────────────────────────────────────
+router.get('/:id', async (req, res) => {
+  try {
+    const trip = await Trip.findById(req.params.id);
+    if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
+    res.json({ success: true, data: trip });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// ── POST /api/trips ──────────────────────────────────────────────────────────
 router.post('/', async (req, res) => {
   try {
-    const body = sanitize(req.body);
-    const trip = new Trip(body);
+    const b = req.body;
+    if (!b.username?.trim()) return res.status(400).json({ success: false, error: 'Username is required' });
+
+    const trip = new Trip({
+      username:     b.username.trim(),
+      designation:  b.designation  || '',
+      issueDate:    b.issueDate    ? new Date(b.issueDate)   : null,
+      airline:      b.airline      || '',
+      travelClass:  b.travelClass  || '',
+      sector:       b.sector       || '',
+      travelDate:   b.travelDate   ? new Date(b.travelDate)  : null,
+      returnDate:   b.returnDate   ? new Date(b.returnDate)  : null,
+      exitTime:     b.exitTime     || '',
+      entryTime:    b.entryTime    || '',
+      inIndiaDays:  Number(b.inIndiaDays)  || 0,
+      inUAEDays:    Number(b.inUAEDays)    || 0,
+      fare:         (b.fare != null && b.fare !== '') ? Number(b.fare) : null,
+      fareCurrency: b.fareCurrency || 'AED',
+      notes:        b.notes        || '',
+      startingLocation: b.startingLocation || '', // 'IN_UAE' | 'IN_INDIA' | ''
+    });
+
     await trip.save();
     res.status(201).json({ success: true, data: trip });
-    sendBackupEmail({ action: `New record for ${trip.username} (${trip.sector || '—'})`, changedTrip: trip, username: trip.username });
-  } catch (err) {
-    res.status(400).json({ success: false, error: err.message });
-  }
+    triggerBackup('added', b.username.trim());
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
-// ── PUT /api/trips/:id ────────────────────────────────────────────────────────
+// ── PUT /api/trips/:id ───────────────────────────────────────────────────────
 router.put('/:id', async (req, res) => {
   try {
-    const body    = sanitize(req.body);
-    const updated = await Trip.findByIdAndUpdate(req.params.id, body, { new: true });
-    if (!updated) return res.status(404).json({ success: false, error: 'Trip not found' });
-    res.json({ success: true, data: updated });
-    sendBackupEmail({ action: `Record edited for ${updated.username} (${updated.sector || '—'})`, changedTrip: updated, username: updated.username });
-  } catch (err) {
-    res.status(400).json({ success: false, error: err.message });
-  }
+    const trip = await Trip.findById(req.params.id);
+    if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
+    const b = req.body;
+    if (b.username !== undefined) trip.username    = b.username.trim();
+    if (b.designation  !== undefined) trip.designation  = b.designation  || '';
+    if (b.airline      !== undefined) trip.airline      = b.airline      || '';
+    if (b.travelClass  !== undefined) trip.travelClass  = b.travelClass  || '';
+    if (b.sector       !== undefined) trip.sector       = b.sector       || '';
+    if (b.exitTime     !== undefined) trip.exitTime     = b.exitTime     || '';
+    if (b.entryTime    !== undefined) trip.entryTime    = b.entryTime    || '';
+    if (b.notes        !== undefined) trip.notes        = b.notes        || '';
+    if (b.startingLocation !== undefined) trip.startingLocation = b.startingLocation || '';
+    trip.issueDate    = b.issueDate   ? new Date(b.issueDate)   : null;
+    trip.travelDate   = b.travelDate  ? new Date(b.travelDate)  : null;
+    trip.returnDate   = b.returnDate  ? new Date(b.returnDate)  : null;
+    trip.inIndiaDays  = Number(b.inIndiaDays)  || 0;
+    trip.inUAEDays    = Number(b.inUAEDays)    || 0;
+    trip.fare         = (b.fare != null && b.fare !== '') ? Number(b.fare) : null;
+    trip.fareCurrency = b.fareCurrency || 'AED';
+    await trip.save();
+    res.json({ success: true, data: trip });
+    triggerBackup('updated', trip.username);
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
-// ── DELETE /api/trips/:id ─────────────────────────────────────────────────────
+// ── DELETE /api/trips/:id ────────────────────────────────────────────────────
 router.delete('/:id', async (req, res) => {
   try {
-    const deleted = await Trip.findByIdAndDelete(req.params.id);
-    if (!deleted) return res.status(404).json({ success: false, error: 'Trip not found' });
-    res.json({ success: true, message: 'Deleted' });
-    sendBackupEmail({ action: `Record DELETED for ${deleted.username} (${deleted.sector || '—'})`, changedTrip: deleted, username: deleted.username });
-  } catch (err) {
-    res.status(400).json({ success: false, error: err.message });
-  }
+    const trip = await Trip.findByIdAndDelete(req.params.id);
+    if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
+    res.json({ success: true, message: 'Trip deleted' });
+    triggerBackup('deleted', trip.username);
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
-
-// ── Sanitize incoming body ────────────────────────────────────────────────────
-function sanitize(body) {
-  const out = {};
-
-  out.username      = (body.username    || '').trim();
-  out.designation   = (body.designation || '').trim();
-  out.airline       = (body.airline     || '').trim();
-  out.sector        = (body.sector      || '').trim();
-  out.travelClass   = (body.travelClass || '').trim();
-  out.exitTime      = (body.exitTime    || '').trim();
-  out.entryTime     = (body.entryTime   || '').trim();
-  out.notes         = (body.notes       || '').trim();
-
-  // inIndiaDays / inUAEDays — always numeric, default 0
-  out.inIndiaDays   = body.inIndiaDays !== undefined && body.inIndiaDays !== '' ? Number(body.inIndiaDays) : 0;
-  out.inUAEDays     = body.inUAEDays   !== undefined && body.inUAEDays   !== '' ? Number(body.inUAEDays)   : 0;
-
-  // issueDate
-  out.issueDate     = body.issueDate  && String(body.issueDate).trim()  ? new Date(body.issueDate)  : null;
-  out.returnDate    = body.returnDate && String(body.returnDate).trim() ? new Date(body.returnDate) : null;
-
-  // travelDate vs travelDateText
-  const tdText = (body.travelDateText || '').trim();
-  const tdDate = (body.travelDate     || '');
-
-  if (tdText === 'In UAE' || tdText === 'In India') {
-    out.travelDateText = tdText;
-    out.travelDate     = null;
-  } else if (tdDate) {
-    out.travelDate     = new Date(tdDate);
-    out.travelDateText = null;
-  } else {
-    out.travelDate     = null;
-    out.travelDateText = null;
-  }
-
-  return out;
-}
 
 module.exports = router;

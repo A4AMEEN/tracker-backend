@@ -1,3 +1,4 @@
+// server.js  (main entry — add users route)
 require('dotenv').config();
 const express  = require('express');
 const mongoose = require('mongoose');
@@ -5,7 +6,7 @@ const cors     = require('cors');
 
 const tripRoutes  = require('./routes/trips');
 const statsRoutes = require('./routes/stats');
-const userRoutes  = require('./routes/users');
+const userRoutes  = require('./routes/users');   // ← NEW
 
 const app = express();
 
@@ -15,7 +16,7 @@ app.use(express.json());
 // Routes
 app.use('/api/trips', tripRoutes);
 app.use('/api/stats', statsRoutes);
-app.use('/api/users', userRoutes);
+app.use('/api/users', userRoutes);              // ← NEW
 
 // Health check
 app.get('/api/health', (req, res) => {
@@ -29,39 +30,14 @@ app.use((err, req, res, next) => {
 });
 
 const PORT        = process.env.PORT || 3000;
-const MONGODB_URI = process.env.MONGODB_URI;
-
-// MongoDB Keepalive function (prevents Atlas free-tier pause)
-const keepalivePing = async () => {
-  try {
-    const adminDb = mongoose.connection.db || (await mongoose.connection);
-    await adminDb.admin().ping();
-    console.log('🔄 Atlas keepalive ping sent');
-  } catch (err) {
-    console.warn('⚠️ Keepalive ping failed (normal if local DB):', err.message);
-  }
-};
-
-// Start periodic pings (every 12 hours = 43,200,000 ms)
-const startKeepalive = () => {
-  keepalivePing(); // Initial ping
-  setInterval(keepalivePing, 12 * 60 * 60 * 1000); // Every 12 hours
-  console.log('⏰ Atlas keepalive started (pings every 12h)');
-};
-
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/travel-tracker';
+  
 mongoose.connect(MONGODB_URI)
   .then(() => {
     console.log('✅ Connected to MongoDB');
-    startKeepalive(); // Start pings after connection
     app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PORT}`));
   })
   .catch((err) => {
     console.error('❌ MongoDB connection error:', err);
     process.exit(1);
   });
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('🛑 Shutting down gracefully');
-  mongoose.connection.close(() => process.exit(0));
-});
